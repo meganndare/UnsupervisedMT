@@ -17,6 +17,7 @@ from logging import getLogger
 import numpy as np
 import torch
 from torch import optim
+import wandb
 
 from .logger import create_logger
 from .data.dictionary import EOS_WORD, UNK_WORD
@@ -70,6 +71,12 @@ def initialize_exp(params, logger_filename='train.log'):
         np.random.seed(params.seed)
         torch.manual_seed(params.seed)
         torch.cuda.manual_seed(params.seed)
+        os.environ['PYTHONHASHSEED'] = str(params.seed)
+        torch.cuda.manual_seed_all(params.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        random.seed(params.seed)
+        print('random seed set.')
 
     # environment variables
     if 'pivo_directions' in params and len(params.pivo_directions) > 0:
@@ -109,6 +116,7 @@ def get_dump_path(params):
             exp_id = os.environ.get('SLURM_JOB_ID')
         if exp_id is None:
             chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+            random.seed(None)
             while True:
                 exp_id = ''.join(random.choice(chars) for _ in range(10))
                 if not os.path.isdir(os.path.join(sweep_path, exp_id)):
@@ -116,6 +124,7 @@ def get_dump_path(params):
         else:
             assert exp_id.isdigit()
         params.exp_id = exp_id
+        random.seed(params.seed)
     else:
         assert os.path.isdir(os.path.join(sweep_path, params.exp_id))  # reload an experiment
 
@@ -174,7 +183,7 @@ def get_optimizer(parameters, s):
         raise Exception('Unknown optimization method: "%s"' % method)
 
     # check that we give good parameters to the optimizer
-    expected_args = inspect.getargspec(optim_fn.__init__)[0]
+    expected_args = inspect.getfullargspec(optim_fn.__init__)[0]
     assert expected_args[:2] == ['self', 'params']
     if not all(k in expected_args[2:] for k in optim_params.keys()):
         raise Exception('Unexpected parameters: expected "%s", got "%s"' % (

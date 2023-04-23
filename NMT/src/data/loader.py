@@ -153,9 +153,9 @@ def load_para_data(params, data):
 
         datasets = []
 
-        for name, path in zip(['train', 'valid', 'test'], paths):
+        for name, path in zip(['train', 'valid', 'test', 'testtrain', 'gen'], paths):
             if path == '':
-                assert name == 'train'
+                assert name in ['train', 'testtrain', 'gen']
                 datasets.append((name, None))
                 continue
             assert name != 'train' or params.n_para != 0
@@ -331,10 +331,10 @@ def check_all_data_params(params):
     params.para_dataset = {k: v for k, v in [x.split(':') for x in params.para_dataset.split(';') if len(x) > 0]}
     assert type(params.para_dataset) is dict
     assert all(len(k.split('-')) == 2 for k in params.para_dataset.keys())
-    assert all(len(v.split(',')) == 3 for v in params.para_dataset.values())
+    assert all(len(v.split(',')) == 5 for v in params.para_dataset.values()) # adding in test train and gen para sets
     params.para_dataset = {tuple(k.split('-')): tuple(v.split(',')) for k, v in params.para_dataset.items()}
     assert not (params.n_para == 0) ^ (all(v[0] == '' for v in params.para_dataset.values()))
-    for (lang1, lang2), (train_path, valid_path, test_path) in params.para_dataset.items():
+    for (lang1, lang2), (train_path, valid_path, test_path, testtrain_path, gen_path) in params.para_dataset.items():
         assert lang1 < lang2 and lang1 in params.langs and lang2 in params.langs
         assert train_path == '' or os.path.isfile(train_path.replace('XX', lang1))
         assert train_path == '' or os.path.isfile(train_path.replace('XX', lang2))
@@ -342,6 +342,10 @@ def check_all_data_params(params):
         assert os.path.isfile(valid_path.replace('XX', lang2))
         assert os.path.isfile(test_path.replace('XX', lang1))
         assert os.path.isfile(test_path.replace('XX', lang2))
+        assert testtrain_path == '' or os.path.isfile(testtrain_path.replace('XX', lang1))
+        assert testtrain_path == '' or os.path.isfile(testtrain_path.replace('XX', lang2))
+        assert gen_path == '' or os.path.isfile(gen_path.replace('XX', lang1))
+        assert gen_path == '' or os.path.isfile(gen_path.replace('XX', lang2))
 
     # check back-parallel datasets
     params.back_dataset = {k: v for k, v in [x.split(':') for x in params.back_dataset.split(';') if len(x) > 0]}
@@ -431,7 +435,7 @@ def check_all_data_params(params):
         assert lang in params.mono_directions or any(lang1 == lang3 == lang for (lang1, _, lang3) in params.pivo_directions)
 
     # check all parallel datasets are used
-    for (lang1, lang2), (train_path, _, _) in params.para_dataset.items():
+    for (lang1, lang2), (train_path, _, _, _, _) in params.para_dataset.items():
         assert (train_path == '' or
                 (lang1, lang2) in params.para_directions or
                 (lang2, lang1) in params.para_directions or
@@ -511,7 +515,7 @@ def load_data(params, mono_only=False):
     # data summary
     logger.info('============ Data summary')
     for (lang1, lang2), v in data['para'].items():
-        for data_type in ['train', 'valid', 'test']:
+        for data_type in ['train', 'valid', 'test', 'testtrain', 'gen']:
             if v[data_type] is None:
                 continue
             logger.info('{: <18} - {: >5} - {: >4} -> {: >4}:{: >10}'.format('Parallel data', data_type, lang1, lang2, len(v[data_type])))

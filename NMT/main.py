@@ -8,6 +8,7 @@
 import time
 import json
 import argparse
+import wandb
 
 from src.data.loader import check_all_data_params, load_data
 from src.utils import bool_flag, initialize_exp
@@ -230,6 +231,101 @@ def get_parser():
     return parser
 
 
+def init_wandb_exp(params):
+    wandb.init(
+        project="unsupervised-semantic-parsing",
+        config={
+            "exp_name": params.exp_name,
+            "exp_id": params.exp_id,
+            "dump_path": params.dump_path,
+            "seed": params.seed,
+            "emb_dim": params.emb_dim,
+            "n_enc_layers": params.n_enc_layers,
+            "n_dec_layers": params.n_dec_layers,
+            "hidden_dim": params.hidden_dim,
+            "lstm_proj": params.lstm_proj,
+            "dropout": params.dropout,
+            "label_smoothing": params.label_smoothing,
+            "attention": params.attention,
+            "transformer": params.transformer,
+            "transformer_ffn_emb_dim": params.transformer_ffn_emb_dim,
+            "attention_dropout": params.attention_dropout,
+            "relu_dropout": params.relu_dropout,
+            "encoder_attention_heads": params.encoder_attention_heads,
+            "decoder_attention_heads": params.decoder_attention_heads,
+            "encoder_normalize_before": params.encoder_normalize_before,
+            "decoder_normalize_before": params.decoder_normalize_before,
+            "share_lang_emb": params.share_lang_emb,
+            "share_encdec_emb": params.share_encdec_emb,
+            "share_decpro_emb": params.share_decpro_emb,
+            "share_output_emb": params.share_output_emb,
+            "share_lstm_proj": params.share_lstm_proj,
+            "share_enc": params.share_enc,
+            "share_dec": params.share_dec,
+            "word_shuffle": params.word_shuffle,
+            "word_dropout": params.word_dropout,
+            "word_blank": params.word_blank,
+            "dis_layers": params.dis_layers,
+            "dis_hidden_dim": params.dis_hidden_dim,
+            "dis_dropout": params.dis_dropout,
+            "dis_clip": params.dis_clip,
+            "dis_smooth": params.dis_smooth,
+            "dis_input_proj": params.dis_input_proj,
+            "langs": params.langs,
+            "vocab": params.vocab,
+            "vocab_min_count": params.vocab_min_count,
+            "n_mono": params.n_mono,
+            "n_para": params.n_para,
+            "n_back": params.n_back,
+            "max_len": params.max_len,
+            "max_vocab": params.max_vocab,
+            "n_dis": params.n_dis,
+            "mono_directions": params.mono_directions,
+            "para_directions": params.para_directions,
+            "pivo_directions": params.pivo_directions,
+            "back_directions": params.back_directions,
+            "otf_sample": params.otf_sample,
+            "otf_backprop_temperature": params.otf_backprop_temperature,
+            "otf_sync_params_every": params.otf_sync_params_every,
+            "otf_num_processes": params.otf_num_processes,
+            "otf_update_enc": params.otf_update_enc,
+            "otf_update_dec": params.otf_update_dec,
+            "lm_before": params.lm_before,
+            "lm_after": params.lm_after,
+            "lm_share_enc": params.lm_share_enc,
+            "lm_share_dec": params.lm_share_dec,
+            "lm_share_emb": params.lm_share_emb,
+            "lm_share_proj": params.lm_share_proj,
+            "batch_size": params.batch_size,
+            "group_by_size": params.group_by_size,
+            "lambda_xe_mono": params.lambda_xe_mono,
+            "lambda_xe_para": params.lambda_xe_para,
+            "lambda_xe_back": params.lambda_xe_back,
+            "lambda_xe_otfd": params.lambda_xe_otfd,
+            "lambda_xe_otfa": params.lambda_xe_otfa,
+            "lambda_dis": params.lambda_dis,
+            "lambda_lm": params.lambda_lm,
+            "enc_optimizer": params.enc_optimizer,
+            "dec_optimizer": params.dec_optimizer,
+            "dis_optimizer": params.dis_optimizer,
+            "clip_grad_norm": params.clip_grad_norm,
+            "epoch_size": params.epoch_size,
+            "max_epoch": params.max_epoch,
+            "stopping_criterion": params.stopping_criterion,
+            "pretrained_emb": params.pretrained_emb,
+            "pretrained_out": params.pretrained_out,
+            "freeze_enc_emb": params.freeze_enc_emb,
+            "freeze_dec_emb": params.freeze_dec_emb,
+            "eval_only": params.eval_only,
+            "beam_size": params.beam_size,
+            "length_penalty": params.length_penalty,
+            #"mono_dataset": params.mono_dataset,
+            #"para_dataset": params.para_dataset,
+            #"back_dataset": params.back_dataset,
+        }
+    )
+
+
 def main(params):
     # check parameters
     assert params.exp_name
@@ -240,6 +336,9 @@ def main(params):
     logger = initialize_exp(params)
     data = load_data(params)
     encoder, decoder, discriminator, lm = build_mt_model(params, data)
+
+    if not params.eval_only:
+        init_wandb_exp(params)
 
     # initialize trainer / reload checkpoint / initialize evaluator
     trainer = TrainerMT(encoder, decoder, discriminator, lm, data, params)
@@ -342,12 +441,17 @@ def main(params):
         for k, v in scores.items():
             logger.info('%s -> %.6f' % (k, v))
         logger.info("__log__:%s" % json.dumps(scores))
+        
+        # log to WandB
+        wandb.log(scores)
 
         # save best / save periodic / end epoch
         trainer.save_best_model(scores)
         trainer.save_periodic()
         trainer.end_epoch(scores)
         trainer.test_sharing()
+    
+    wandb.finish()
 
 
 if __name__ == '__main__':
