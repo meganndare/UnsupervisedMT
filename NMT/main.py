@@ -22,6 +22,8 @@ def get_parser():
     parser = argparse.ArgumentParser(description='Language transfer')
     parser.add_argument("--exp_name", type=str, default="",
                         help="Experiment name")
+    parser.add_argument("--proj_name", type=str, default="unsupervised-semantic-parsing",
+                        help="WandB project name")
     parser.add_argument("--exp_id", type=str, default="",
                         help="Experiment ID")
     parser.add_argument("--dump_path", type=str, default="./dumped/",
@@ -233,7 +235,7 @@ def get_parser():
 
 def init_wandb_exp(params):
     wandb.init(
-        project="unsupervised-semantic-parsing",
+        project=params.proj_name,
         config={
             "exp_name": params.exp_name,
             "exp_id": params.exp_id,

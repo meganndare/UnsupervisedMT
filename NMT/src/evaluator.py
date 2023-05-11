@@ -7,6 +7,7 @@
 
 import os
 import subprocess
+import re
 from collections import OrderedDict
 from logging import getLogger
 import numpy as np
@@ -22,10 +23,11 @@ logger = getLogger()
 TOOLS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools')
 BLEU_SCRIPT_PATH = os.path.join(TOOLS_PATH, 'mosesdecoder/scripts/generic/multi-bleu.perl')
 assert os.path.isfile(BLEU_SCRIPT_PATH), "Moses not found. Please be sure you downloaded Moses in %s" % TOOLS_PATH
-OG_GEN_FILE_PATH = '/home/CE/mdare/code/COGS/data/gen.tsv'
-PROC_GEN_FILE_PATH = '/home/CE/mdare/code/unsupervised_semparse/data/gen/proc_gen.tsv'
+OG_GEN_FILE_PATH = '/localfast/mdare/code/COGS/data/gen.tsv'
+PROC_GEN_FILE_PATH = '/localfast/mdare/code/unsupervised_semparse/data/gen/proc_gen.tsv'
 assert os.path.isfile(OG_GEN_FILE_PATH), 'original cogs gen.tsv file not found'
 assert os.path.isfile(PROC_GEN_FILE_PATH), 'preprocessed cogs gen.tsv file not found'
+AMR_PROJ_ID = 'unsupervised-amr-parsing'
 
 
 
@@ -158,6 +160,17 @@ class EvaluatorMT(object):
                 with open(lang2_path, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(lang2_txt) + '\n')
 
+                # if this is AMR and we want to calculate SMATCH, create a ref file with \n\n separation
+                if params.proj_name == AMR_PROJ_ID:
+
+                    # create dirs which should not exist yet; leave pred* empty for now
+                    os.makedirs(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}'))
+                    os.makedirs(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}'))
+
+                    for i, x in enumerate(lang2_txt):
+                        with open(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
+                            f.write(x + '\n')
+
                 # restore original segmentation
                 restore_segmentation(lang1_path)
                 restore_segmentation(lang2_path)
@@ -165,6 +178,9 @@ class EvaluatorMT(object):
                 # store data paths
                 params.ref_paths[(lang2, lang1, data_type)] = lang1_path
                 params.ref_paths[(lang1, lang2, data_type)] = lang2_path
+
+
+
 
     def eval_para(self, lang1, lang2, data_type, scores):
         """
@@ -222,6 +238,25 @@ class EvaluatorMT(object):
         exact_match = eval_exact_match(ref_path, hyp_path)
         logger.info("Exact match accuracy %s %s : %f" % (hyp_path, ref_path, exact_match))
         scores['em_%s_%s_%s' % (lang1, lang2, data_type)] = exact_match
+
+        # evaluate smatch for AMR
+        if params.proj_name == AMR_PROJ_ID:
+            if data_type in ['valid', 'test']:
+                amr_ref_path = os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}')
+                amr_hyp_path = os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}')
+
+                # write predicted amrs
+                for i, x in enumerate(txt):
+                    with open(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
+                            f.write(x + '\n')
+                
+                (p, r, f), well_formed_amrs = eval_smatch(amr_ref_path, amr_hyp_path)
+                logger.info("SMATCH %s %s : (p=%f, r=%f, f=%f)" % (amr_hyp_path, amr_ref_path, p, r, f))
+                logger.info("Percentage of well-formed AMRs %s %s : %f)" % (amr_hyp_path, amr_ref_path, well_formed_amrs))
+                scores['smatch_p_%s_%s_%s' % (lang1, lang2, data_type)] = p
+                scores['smatch_r_%s_%s_%s' % (lang1, lang2, data_type)] = r
+                scores['smatch_f_%s_%s_%s' % (lang1, lang2, data_type)] = f
+                scores['wellformedness_%s_%s_%s' % (lang1, lang2, data_type)] = well_formed_amrs
 
         # evaluate BLEU score
         if data_type in ['valid', 'test']:
@@ -365,6 +400,44 @@ def eval_exact_match(ref, hyp):
                 correct += 1
         
         return float(correct/len(pred_lines))
+    
+
+def eval_smatch(ref, hyp):
+    """
+    Given a parent directory of hypothesis and reference amrs,
+    evaluate the smatch score and well-formedness metric
+    """
+    assert os.path.isdir(ref) and os.path.isdir(hyp)
+    amr_total = len(os.listdir(ref))
+    assert amr_total == len(os.listdir(hyp))
+
+    wf_count = 0
+    p_scores = []
+    r_scores = []
+    f_scores = []
+
+    for i in range(amr_total):
+
+        completed_process = subprocess.run(['smatch.py', '-f', f'{hyp}/{i}.txt', f'{ref}/{i}.txt', '--pr'], timeout=1, capture_output=True)
+
+        if completed_process.returncode == 0:
+            wf_count += 1
+            (p, r, f) = tuple(re.findall("\d+\.\d+", completed_process.stdout.decode("utf-8")))
+            p_scores.append(p)
+            r_scores.append(r)
+            f_scores.append(f)
+
+    p_scores = [float(i) for i in p_scores]
+    r_scores = [float(i) for i in r_scores]
+    f_scores = [float(i) for i in f_scores]
+
+    if wf_count == 0:
+        return (0.0, 0.0, 0.0), 0.0
+
+    return (sum(p_scores) / (len(p_scores) + wf_count), \
+            sum(r_scores) / (len(r_scores) + wf_count), \
+            sum(f_scores) / (len(f_scores) + wf_count)), \
+            wf_count / amr_total
     
 
 def eval_gen_type_exact_match(ref, hyp, expected_counts_by_gen_type, gen_type_dict):
