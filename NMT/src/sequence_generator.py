@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 class SequenceGenerator(object):
     def __init__(self, decoder, bos, pad, eos, vocab_size, beam_size=1,
-                 minlen=1, maxlen=175, stop_early=True, normalize_scores=True,
+                 minlen=1, maxlen=500, stop_early=True, normalize_scores=True,
                  len_penalty=1, retain_dropout=False, sampling=False):
         """Generates translations of a given source sentence.
 
@@ -279,6 +279,7 @@ class SequenceGenerator(object):
             eos_mask = cand_indices.eq(self.eos)
 
             finalized_sents = set()
+            #raise RuntimeError(f'step: {step} and {self.minlen}')
             if step >= self.minlen:
                 # only consider eos when it's among the top beam_size indices
                 torch.masked_select(
@@ -325,6 +326,7 @@ class SequenceGenerator(object):
                 bsz = new_bsz
             else:
                 batch_idxs = None
+                #raise RuntimeError('len(finalized_sents) !> 0!!!')
 
             # set active_mask so that values > cand_size indicate eos hypos
             # and values < cand_size indicate candidate active hypos.

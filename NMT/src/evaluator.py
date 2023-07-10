@@ -160,6 +160,10 @@ class EvaluatorMT(object):
                 with open(lang2_path, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(lang2_txt) + '\n')
 
+                # restore original segmentation
+                restore_segmentation(lang1_path)
+                restore_segmentation(lang2_path)
+
                 # if this is AMR and we want to calculate SMATCH, create a ref file with \n\n separation
                 if params.proj_name == AMR_PROJ_ID:
 
@@ -167,13 +171,11 @@ class EvaluatorMT(object):
                     os.makedirs(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}'))
                     os.makedirs(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}'))
 
-                    for i, x in enumerate(lang2_txt):
-                        with open(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
-                            f.write(x + '\n')
-
-                # restore original segmentation
-                restore_segmentation(lang1_path)
-                restore_segmentation(lang2_path)
+                    with open(lang2_path, 'r', encoding='utf-8') as ref_txt:
+                        ref_lines = ref_txt.readlines()
+                        for i, x in enumerate(ref_lines):
+                            with open(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
+                                f.write(x)
 
                 # store data paths
                 params.ref_paths[(lang2, lang1, data_type)] = lang1_path
@@ -246,17 +248,33 @@ class EvaluatorMT(object):
                 amr_hyp_path = os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}')
 
                 # write predicted amrs
-                for i, x in enumerate(txt):
-                    with open(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
-                            f.write(x + '\n')
+                with open(hyp_path, 'r', encoding='utf-8') as hyp_txt:
+                    hyp_lines = hyp_txt.readlines()
+                    for i, x in enumerate(hyp_lines):
+                        with open(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
+                                f.write(x)
                 
+                avg_out_len, bucketed_avgs = eval_length_stats(ref_path, hyp_path)
                 (p, r, f), well_formed_amrs = eval_smatch(amr_ref_path, amr_hyp_path)
+                
                 logger.info("SMATCH %s %s : (p=%f, r=%f, f=%f)" % (amr_hyp_path, amr_ref_path, p, r, f))
                 logger.info("Percentage of well-formed AMRs %s %s : %f)" % (amr_hyp_path, amr_ref_path, well_formed_amrs))
+                logger.info("Avg hyp output length as percent of ref %s : %f)" % (amr_hyp_path, avg_out_len))
+                logger.info("Avg hyp output length as percent of ref (0-49) %s : %f)" % (amr_hyp_path, bucketed_avgs[0]))
+                logger.info("Avg hyp output length as percent of ref (50-99) %s : %f)" % (amr_hyp_path, bucketed_avgs[1]))
+                logger.info("Avg hyp output length as percent of ref (100-149) %s : %f)" % (amr_hyp_path, bucketed_avgs[2]))
+                logger.info("Avg hyp output length as percent of ref (150-199) %s : %f)" % (amr_hyp_path, bucketed_avgs[3]))
+                logger.info("Avg hyp output length as percent of ref (>200) %s : %f)" % (amr_hyp_path, bucketed_avgs[4]))
                 scores['smatch_p_%s_%s_%s' % (lang1, lang2, data_type)] = p
                 scores['smatch_r_%s_%s_%s' % (lang1, lang2, data_type)] = r
                 scores['smatch_f_%s_%s_%s' % (lang1, lang2, data_type)] = f
                 scores['wellformedness_%s_%s_%s' % (lang1, lang2, data_type)] = well_formed_amrs
+                scores['len_avg_overall_%s_%s_%s' % (lang1, lang2, data_type)] = avg_out_len
+                scores['len_avg_bucket_0_49_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[0]
+                scores['len_avg_bucket_50_99_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[1]
+                scores['len_avg_bucket_100_149_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[2]
+                scores['len_avg_bucket_150_199_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[3]
+                scores['len_avg_bucket_200_plus_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[4]
 
         # evaluate BLEU score
         if data_type in ['valid', 'test']:
@@ -402,6 +420,72 @@ def eval_exact_match(ref, hyp):
         return float(correct/len(pred_lines))
     
 
+def eval_length_stats(ref, hyp):
+    """
+    Given ref and gold files, check length of predicted versus reference for each bucket
+    """
+
+    assert os.path.isfile(ref) and os.path.isfile(hyp)
+
+    with open(hyp, 'r', encoding='utf-8') as pred, open(ref, 'r', encoding='utf-8') as gold:
+        pred_lines = pred.readlines()
+        gold_lines = gold.readlines()
+
+        assert len(pred_lines) == len(gold_lines), 'predicted sentence count does not match gold sentence count!'
+
+        output_lens_ref = np.empty(len(pred_lines))
+        output_lens_hyp = np.empty(len(pred_lines))
+
+        bucketed_len_percents = {0: [], # len 0-49
+                                 1: [], # len 50-99
+                                 2: [], # len 100-149
+                                 3: [], # len 150-199
+                                 4: [], # len > 200
+                                }
+        bucketed_avgs = {0:0, 
+                         1:0, 
+                         2:0, 
+                         3:0, 
+                         4:0}
+
+        for i, line in enumerate(pred_lines):
+            hyp_toks = len(line.split())
+            ref_toks = len(gold_lines[i].split())
+            output_lens_hyp[i] = hyp_toks
+            output_lens_ref[i] = ref_toks
+
+            if ref_toks < 50:
+                bucketed_len_percents[0] += [hyp_toks/ref_toks]
+            elif 50 <= ref_toks < 100:
+                bucketed_len_percents[1] += [hyp_toks/ref_toks]
+            elif 100 <= ref_toks < 150:
+                bucketed_len_percents[2] += [hyp_toks/ref_toks]
+            elif 150 <= ref_toks < 200:
+                bucketed_len_percents[3] += [hyp_toks/ref_toks]
+            elif ref_toks > 200:
+                bucketed_len_percents[4] += [hyp_toks/ref_toks]
+            else:
+                raise ValueError('not a possible length of reference tokens!')
+
+        avg_output_length = np.average(output_lens_hyp / output_lens_ref)
+
+        logger.info(f'{avg_output_length}')
+        logger.info(f'{len(bucketed_len_percents[0])}')
+        logger.info(f'{len(bucketed_len_percents[1])}')
+        logger.info(f'{len(bucketed_len_percents[2])}')
+        logger.info(f'{len(bucketed_len_percents[3])}')
+        logger.info(f'{len(bucketed_len_percents[4])}')
+
+        for k, v in bucketed_len_percents.items():
+            if len(v) > 0:
+                bucketed_avgs[k] = sum(v) / len(v)
+            else:
+                bucketed_avgs[k] = 0.0
+            logger.info(f'{bucketed_avgs[k]}')
+
+    return avg_output_length, bucketed_avgs
+    
+
 def eval_smatch(ref, hyp):
     """
     Given a parent directory of hypothesis and reference amrs,
@@ -434,9 +518,9 @@ def eval_smatch(ref, hyp):
     if wf_count == 0:
         return (0.0, 0.0, 0.0), 0.0
 
-    return (sum(p_scores) / (len(p_scores) + wf_count), \
-            sum(r_scores) / (len(r_scores) + wf_count), \
-            sum(f_scores) / (len(f_scores) + wf_count)), \
+    return (sum(p_scores) / amr_total, \
+            sum(r_scores) / amr_total, \
+            sum(f_scores) / amr_total), \
             wf_count / amr_total
     
 
