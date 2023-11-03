@@ -7,12 +7,14 @@
 
 import os
 import subprocess
+import shlex
 import re
 from collections import OrderedDict
 from logging import getLogger
 import numpy as np
 import torch
 from torch import nn
+import time
 
 from .utils import restore_segmentation
 
@@ -23,12 +25,13 @@ logger = getLogger()
 TOOLS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools')
 BLEU_SCRIPT_PATH = os.path.join(TOOLS_PATH, 'mosesdecoder/scripts/generic/multi-bleu.perl')
 assert os.path.isfile(BLEU_SCRIPT_PATH), "Moses not found. Please be sure you downloaded Moses in %s" % TOOLS_PATH
-OG_GEN_FILE_PATH = '/localfast/mdare/code/COGS/data/gen.tsv'
-PROC_GEN_FILE_PATH = '/localfast/mdare/code/unsupervised_semparse/data/gen/proc_gen.tsv'
+OG_GEN_FILE_PATH = '/home/CE/mdare/code/COGS/data/gen.tsv'
+PROC_GEN_FILE_PATH = '/home/CE/mdare/code/unsupervised-compgen/data/gen/proc_gen.tsv'
 assert os.path.isfile(OG_GEN_FILE_PATH), 'original cogs gen.tsv file not found'
 assert os.path.isfile(PROC_GEN_FILE_PATH), 'preprocessed cogs gen.tsv file not found'
 AMR_PROJ_ID = 'unsupervised-amr-parsing'
-
+AMR_POSTPROCESS_TRIES = 10
+AMR_POSTPROCESS_TIMEOUT = 600
 
 
 class EvaluatorMT(object):
@@ -164,18 +167,18 @@ class EvaluatorMT(object):
                 restore_segmentation(lang1_path)
                 restore_segmentation(lang2_path)
 
-                # if this is AMR and we want to calculate SMATCH, create a ref file with \n\n separation
-                if params.proj_name == AMR_PROJ_ID:
+                # if this is AMR and we want to calculate SMATCH, create a ref file with \n separation
+                if params.proj_name == AMR_PROJ_ID and params.postprocess_while_training == True:
 
-                    # create dirs which should not exist yet; leave pred* empty for now
-                    os.makedirs(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}'))
-                    os.makedirs(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}'))
-
-                    with open(lang2_path, 'r', encoding='utf-8') as ref_txt:
-                        ref_lines = ref_txt.readlines()
-                        for i, x in enumerate(ref_lines):
-                            with open(os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
-                                f.write(x)
+                    # postprocess AMRs
+                    postprocess_amr(lang2_path, lang1_path, AMR_POSTPROCESS_TIMEOUT, AMR_POSTPROCESS_TRIES)
+                    
+                    # produce format required by SMATCH script
+                    with open(lang2_path + '.restore.final', 'r', encoding='utf-8') as input, \
+                        open(lang2_path + '.SMATCH', 'w', encoding='utf-8') as output:
+                        in_lines = input.readlines()
+                        for line in in_lines:
+                            output.write(line + '\n')
 
                 # store data paths
                 params.ref_paths[(lang2, lang1, data_type)] = lang1_path
@@ -230,6 +233,7 @@ class EvaluatorMT(object):
         hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_type)
         hyp_path = os.path.join(params.dump_path, hyp_name)
         ref_path = params.ref_paths[(lang1, lang2, data_type)]
+        reverse_ref_path = params.ref_paths[(lang2, lang1, data_type)]
 
         # export sentences to hypothesis file / restore BPE segmentation
         with open(hyp_path, 'w', encoding='utf-8') as f:
@@ -242,23 +246,27 @@ class EvaluatorMT(object):
         scores['em_%s_%s_%s' % (lang1, lang2, data_type)] = exact_match
 
         # evaluate smatch for AMR
-        if params.proj_name == AMR_PROJ_ID:
+        if params.proj_name == AMR_PROJ_ID and params.postprocess_while_training == True:
             if data_type in ['valid', 'test']:
                 amr_ref_path = os.path.join(params.dump_path, data_type, f'ref-{lang1}-{lang2}')
                 amr_hyp_path = os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}')
 
-                # write predicted amrs
-                with open(hyp_path, 'r', encoding='utf-8') as hyp_txt:
-                    hyp_lines = hyp_txt.readlines()
-                    for i, x in enumerate(hyp_lines):
-                        with open(os.path.join(params.dump_path, data_type, f'hyp-{lang1}-{lang2}', f'{str(i)}.txt'), 'w', encoding='utf-8') as f:
-                                f.write(x)
+                # postprocess AMRs
+                postprocess_amr(hyp_path, reverse_ref_path, AMR_POSTPROCESS_TIMEOUT, AMR_POSTPROCESS_TRIES)
                 
+                # produce format required by SMATCH script
+                with open(hyp_path + '.restore.final', 'r', encoding='utf-8') as input, \
+                    open(hyp_path + '.SMATCH', 'w', encoding='utf-8') as output:
+                    in_lines = input.readlines()
+                    for line in in_lines:
+                        output.write(line + '\n')
+
+              
                 avg_out_len, bucketed_avgs = eval_length_stats(ref_path, hyp_path)
-                (p, r, f), well_formed_amrs = eval_smatch(amr_ref_path, amr_hyp_path)
+                p, r, f = eval_smatch(ref_path, hyp_path)
                 
                 logger.info("SMATCH %s %s : (p=%f, r=%f, f=%f)" % (amr_hyp_path, amr_ref_path, p, r, f))
-                logger.info("Percentage of well-formed AMRs %s %s : %f)" % (amr_hyp_path, amr_ref_path, well_formed_amrs))
+                #logger.info("Percentage of well-formed AMRs %s %s : %f)" % (amr_hyp_path, amr_ref_path, well_formed_amrs))
                 logger.info("Avg hyp output length as percent of ref %s : %f)" % (amr_hyp_path, avg_out_len))
                 logger.info("Avg hyp output length as percent of ref (0-49) %s : %f)" % (amr_hyp_path, bucketed_avgs[0]))
                 logger.info("Avg hyp output length as percent of ref (50-99) %s : %f)" % (amr_hyp_path, bucketed_avgs[1]))
@@ -268,7 +276,7 @@ class EvaluatorMT(object):
                 scores['smatch_p_%s_%s_%s' % (lang1, lang2, data_type)] = p
                 scores['smatch_r_%s_%s_%s' % (lang1, lang2, data_type)] = r
                 scores['smatch_f_%s_%s_%s' % (lang1, lang2, data_type)] = f
-                scores['wellformedness_%s_%s_%s' % (lang1, lang2, data_type)] = well_formed_amrs
+                #scores['wellformedness_%s_%s_%s' % (lang1, lang2, data_type)] = well_formed_amrs
                 scores['len_avg_overall_%s_%s_%s' % (lang1, lang2, data_type)] = avg_out_len
                 scores['len_avg_bucket_0_49_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[0]
                 scores['len_avg_bucket_50_99_%s_%s_%s' % (lang1, lang2, data_type)] = bucketed_avgs[1]
@@ -398,6 +406,20 @@ def eval_moses_bleu(ref, hyp):
         logger.warning('Impossible to parse BLEU score! "%s"' % result)
         return -1
     
+def postprocess_amr(hyp_path, rev_ref_path, timeout, retries):
+    for i in range(retries):
+        time.sleep(0.3)
+        completed_process = subprocess.run(shlex.split(f'/home/CE/mdare/code/UnsupervisedMT/NMT/src/postprocess_amr.sh {hyp_path} {rev_ref_path}'), timeout=timeout, capture_output=True)
+
+        if completed_process.returncode == 0:
+            return
+        
+    if completed_process.returncode != 0:
+        logger.info(completed_process.stdout.splitlines())
+        logger.info(completed_process.stderr.splitlines())
+        raise RuntimeError(f'Tried {retries} times but couldn\'t properly postprocess AMR in {hyp_path}')
+
+    
 def eval_exact_match(ref, hyp):
     """
     Given a file of hypothesis and reference,
@@ -491,37 +513,43 @@ def eval_smatch(ref, hyp):
     Given a parent directory of hypothesis and reference amrs,
     evaluate the smatch score and well-formedness metric
     """
-    assert os.path.isdir(ref) and os.path.isdir(hyp)
-    amr_total = len(os.listdir(ref))
-    assert amr_total == len(os.listdir(hyp))
+    #assert not os.path.isdir(ref) and not os.path.isdir(hyp)
+    #amr_total = len(os.listdir(ref))
+    #assert amr_total == len(os.listdir(hyp))
 
-    wf_count = 0
+    #wf_count = 0
     p_scores = []
     r_scores = []
     f_scores = []
 
-    for i in range(amr_total):
+    #for i in range(amr_total):
 
-        completed_process = subprocess.run(['smatch.py', '-f', f'{hyp}/{i}.txt', f'{ref}/{i}.txt', '--pr'], timeout=1, capture_output=True)
+    completed_process = subprocess.run(['smatch.py', '-f', f'{hyp}.SMATCH', f'{ref}.SMATCH', '--significant', '4', '--pr'], timeout=30, capture_output=True)
 
-        if completed_process.returncode == 0:
-            wf_count += 1
-            (p, r, f) = tuple(re.findall("\d+\.\d+", completed_process.stdout.decode("utf-8")))
-            p_scores.append(p)
-            r_scores.append(r)
-            f_scores.append(f)
+    if completed_process.returncode == 0:
+        #wf_count += 1
+        (p, r, f) = tuple(re.findall("\d+\.\d+", completed_process.stdout.decode("utf-8")))
+        p_scores.append(p)
+        r_scores.append(r)
+        f_scores.append(f)
 
     p_scores = [float(i) for i in p_scores]
     r_scores = [float(i) for i in r_scores]
     f_scores = [float(i) for i in f_scores]
 
-    if wf_count == 0:
-        return (0.0, 0.0, 0.0), 0.0
+    #if wf_count == 0:
+    #    return (0.0, 0.0, 0.0), 0.0
+    amr_total = None
+    with open(ref + '.restore.final', 'r', encoding='utf-8') as amrs:
+        amr_total = len(amrs.readlines())
+    
+    logger.info(f'Determined total of AMRs in this batch: {amr_total}')
 
-    return (sum(p_scores) / amr_total, \
-            sum(r_scores) / amr_total, \
-            sum(f_scores) / amr_total), \
-            wf_count / amr_total
+    return sum(p_scores), sum(r_scores), sum(f_scores)
+    #return (sum(p_scores) / amr_total, \
+    #        sum(r_scores) / amr_total, \
+    #        sum(f_scores) / amr_total)
+    #        #wf_count / amr_total
     
 
 def eval_gen_type_exact_match(ref, hyp, expected_counts_by_gen_type, gen_type_dict):

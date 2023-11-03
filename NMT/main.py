@@ -32,6 +32,9 @@ def get_parser():
                         help="Save the model periodically")
     parser.add_argument("--seed", type=int, default=-1,
                         help="Random generator seed (-1 for random)")
+    parser.add_argument("--postprocess_while_training", type=bool_flag, default=True,
+                        help="Indicates whether to run AMR postprocessing scripts in the middle of training.")
+
     # autoencoder parameters
     parser.add_argument("--emb_dim", type=int, default=512,
                         help="Embedding layer size")
@@ -321,6 +324,7 @@ def init_wandb_exp(params):
             "eval_only": params.eval_only,
             "beam_size": params.beam_size,
             "length_penalty": params.length_penalty,
+            "postprocess_while_training": params.postprocess_while_training,
             #"mono_dataset": params.mono_dataset,
             #"para_dataset": params.para_dataset,
             #"back_dataset": params.back_dataset,
